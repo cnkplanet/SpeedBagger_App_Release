@@ -17,6 +17,7 @@ on:
     branches: [main]
     paths:
       - 'release-notes/v*.md'
+      - '.github/workflows/release-notes-sync.yml'   # 워크플로가 바뀌면 전체 재동기화
   workflow_dispatch:
     inputs:
       tag:
@@ -51,9 +52,14 @@ jobs:
             release)          tags="$RELEASE_TAG" ;;
             workflow_dispatch) tags="$INPUT_TAG" ;;
             push)
-              # 이번 push 에서 바뀐 안내문 파일명 → 태그
-              tags=$(git diff --name-only HEAD^ HEAD -- 'release-notes/v*.md' \
-                     | sed -n 's#^release-notes/\(v[^/]*\)\.md$#\1#p' | tr '\n' ' ')
+              if git diff --name-only HEAD^ HEAD | grep -q '^.github/workflows/release-notes-sync.yml$'; then
+                # 워크플로 자체가 바뀜 → 안내문이 있는 모든 버전을 다시 맞춘다
+                tags=$(ls release-notes/v*.md | sed -n 's#^release-notes/\(v[^/]*\)\.md$#\1#p' | tr '\n' ' ')
+              else
+                # 이번 push 에서 바뀐 안내문 파일명 → 태그
+                tags=$(git diff --name-only HEAD^ HEAD -- 'release-notes/v*.md' \
+                       | sed -n 's#^release-notes/\(v[^/]*\)\.md$#\1#p' | tr '\n' ' ')
+              fi
               ;;
           esac
           echo "tags=$tags" >> "$GITHUB_OUTPUT"
@@ -81,8 +87,12 @@ jobs:
               # 안내문을 먼저 올린 정상 순서. 태그가 올라오면 release 이벤트가 채운다.
               echo "릴리스 $tag 가 아직 없음 — 태그가 push 되면 반영됩니다"; continue
             fi
+            # Release 본문은 저장소 파일이 아니라 상대 경로가 안 풀린다. images/ 링크를 main 의 raw 절대 주소로 바꿔 넣는다.
+            base="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/release-notes/"
+            body="$(mktemp)"
+            sed -E "s#\]\((images/[^)]+)\)#](${base}\1)#g" "$file" > "$body"
             # --notes-file 은 본문만 바꾼다. prerelease/latest 지정은 건드리지 않는다.
-            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --notes-file "$file"
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --notes-file "$body"
             echo "본문 갱신: $tag ← $file"
           done
           exit $status
