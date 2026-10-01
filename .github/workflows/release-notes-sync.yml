@@ -1,0 +1,88 @@
+name: Release Notes Sync
+
+# release-notes/<태그>.md 의 내용을 같은 태그의 GitHub Release 본문에 넣는다.
+#
+# - 앱 릴리스는 SpeedBagger_App 저장소의 release.yml 이 태그 push 시 PAT 로 이 저장소에 만든다(본문 비어 있음).
+#   PAT 로 만든 릴리스라 이 저장소에 release 이벤트가 발생하고, 그때 이 워크플로가 본문을 채운다.
+# - 안내문을 나중에 고치면(main 의 release-notes/ push) 해당 릴리스 본문도 다시 맞춘다.
+# - 릴리스는 생겼는데 안내문 파일이 없으면 실패로 끝내 누락을 드러낸다. 릴리스 자체는 이미 만들어져 있어 배포에는 영향 없다.
+#   안내문을 추가해 push 하면 push 트리거가 본문을 채우므로 따로 재실행할 필요는 없다.
+# - ffmpeg-* 릴리스(녹화 도구)는 대상이 아니다.
+#
+# 운영 순서: 안내문(release-notes/v<버전>.md)을 먼저 main 에 올리고 → 앱 저장소에 태그를 push 한다.
+on:
+  release:
+    types: [published]
+  push:
+    branches: [main]
+    paths:
+      - 'release-notes/v*.md'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '본문을 채울 릴리스 태그 (예: v1.6.1)'
+        required: true
+
+# 같은 저장소의 릴리스를 고치므로 기본 GITHUB_TOKEN 에 쓰기 권한만 준다.
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # release 이벤트의 기본 ref 는 태그다. 안내문은 항상 main 의 최신본을 쓴다.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 2
+
+      - name: Resolve target tags
+        id: tags
+        env:
+          EVENT: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -eu
+          case "$EVENT" in
+            release)          tags="$RELEASE_TAG" ;;
+            workflow_dispatch) tags="$INPUT_TAG" ;;
+            push)
+              # 이번 push 에서 바뀐 안내문 파일명 → 태그
+              tags=$(git diff --name-only HEAD^ HEAD -- 'release-notes/v*.md' \
+                     | sed -n 's#^release-notes/\(v[^/]*\)\.md$#\1#p' | tr '\n' ' ')
+              ;;
+          esac
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+          echo "대상 태그: ${tags:-(없음)}"
+
+      - name: Update release body
+        env:
+          EVENT: ${{ github.event_name }}
+          TAGS: ${{ steps.tags.outputs.tags }}
+        run: |
+          set -eu
+          status=0
+          for tag in $TAGS; do
+            case "$tag" in
+              ffmpeg-*) echo "skip $tag (녹화 도구 릴리스)"; continue ;;
+            esac
+            # 태그에 v 가 없어도(앱 release.yml 이 '[0-9]*' 태그도 허용) v<버전>.md 를 찾는다
+            file="release-notes/${tag}.md"
+            [ -f "$file" ] || file="release-notes/v${tag#v}.md"
+            if [ ! -f "$file" ]; then
+              echo "::error::안내문 파일이 없습니다: release-notes/${tag}.md — 파일을 추가해 main 에 push 하면 본문이 채워집니다"
+              status=1; continue
+            fi
+            if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              # 안내문을 먼저 올린 정상 순서. 태그가 올라오면 release 이벤트가 채운다.
+              echo "릴리스 $tag 가 아직 없음 — 태그가 push 되면 반영됩니다"; continue
+            fi
+            # --notes-file 은 본문만 바꾼다. prerelease/latest 지정은 건드리지 않는다.
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --notes-file "$file"
+            echo "본문 갱신: $tag ← $file"
+          done
+          exit $status
